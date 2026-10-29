@@ -1,0 +1,31 @@
+{
+    "name": "enadstack/laravel-service-client",
+    "description": "Base HTTP client for enadstack Lego services: auth headers, tenant, idempotency, retries, error envelope mapping, webhook verification and fakes.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^13.0",
+        "illuminate/http": "^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^11.0",
+        "pestphp/pest": "^4.0",
+        "laravel/pint": "^1.27"
+    },
+    "autoload": {
+        "psr-4": { "Enadstack\\ServiceClient\\": "src/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "Enadstack\\ServiceClient\\Tests\\": "tests/" }
+    },
+    "extra": {
+        "laravel": {
+            "providers": ["Enadstack\\ServiceClient\\ServiceClientServiceProvider"]
+        }
+    },
+    "scripts": { "test": "vendor/bin/pest" },
+    "config": { "allow-plugins": { "pestphp/pest-plugin": true } },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
