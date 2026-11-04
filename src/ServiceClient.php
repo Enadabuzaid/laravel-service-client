@@ -5,6 +5,7 @@ namespace Enadstack\ServiceClient;
 use Enadstack\ServiceClient\Testing\Fakeable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -185,15 +186,55 @@ abstract class ServiceClient
             ->timeout((int) $this->config('timeout', config('service-client.timeout')))
             ->connectTimeout((int) $this->config('connect_timeout', config('service-client.connect_timeout')))
             ->retry(
-                (int) config('service-client.retries') + 1,
-                (int) config('service-client.retry_delay_ms'),
-                fn ($e) => $e instanceof ConnectionException,
+                $this->maxAttempts(),
+                fn (int $attempt, ?\Throwable $e) => $this->retryDelayMs($e),
+                fn (\Throwable $e) => $this->shouldRetry($e, $method, $idempotencyKey),
                 throw: false,
             );
 
         $token = $this->config('api_key', $this->config('token'));
 
         return filled($token) ? $request->withToken($token) : $request;
+    }
+
+    /** Total attempts (1 + retries); services.<name>.retries overrides the global value. */
+    protected function maxAttempts(): int
+    {
+        return max(0, (int) $this->config('retries', config('service-client.retries'))) + 1;
+    }
+
+    /**
+     * Connection errors are always retried (the same idempotency key is reused,
+     * so a write that did land is deduplicated). Retryable HTTP statuses are
+     * retried only for GET, or for writes whose key the caller supplied.
+     */
+    protected function shouldRetry(\Throwable $e, string $method, ?string $idempotencyKey): bool
+    {
+        if ($e instanceof ConnectionException) {
+            return true;
+        }
+
+        if (! $e instanceof RequestException) {
+            return false;
+        }
+
+        $idempotent = $method === 'GET' || ($idempotencyKey !== null && filled($this->idempotencyKey));
+
+        return $idempotent && in_array($e->response->status(), (array) config('service-client.retry_statuses', [429, 502, 503, 504]), true);
+    }
+
+    /** Honours Retry-After (capped by max_retry_after_seconds), else retry_delay_ms. */
+    protected function retryDelayMs(?\Throwable $e): int
+    {
+        if ($e instanceof RequestException) {
+            $after = static::parseRetryAfter($e->response->header('Retry-After'));
+
+            if ($after !== null) {
+                return min($after, max(0, (int) config('service-client.max_retry_after_seconds', 30))) * 1000;
+            }
+        }
+
+        return max(0, (int) config('service-client.retry_delay_ms'));
     }
 
     protected function mapError(Response $response): ServiceException

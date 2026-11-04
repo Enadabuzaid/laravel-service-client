@@ -6,6 +6,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
 use Illuminate\Support\Str;
 
 class DemoClient extends ServiceClient
@@ -32,6 +33,7 @@ class DemoClient extends ServiceClient
 }
 
 beforeEach(function () {
+    Sleep::fake();
     config([
         'service-client.application' => 'tafadel',
         'services.demo' => ['url' => 'http://demo.test', 'api_key' => 'ia_live_x'],
@@ -127,7 +129,88 @@ it('maps connection failures to SERVICE_UNREACHABLE after retrying', function ()
     }
 });
 
-it('does not retry on HTTP error responses', function () {
+it('retries GET on 503 and then succeeds', function () {
+    Sleep::fake();
+    Http::fake(['*' => Http::sequence()->push([], 503)->push(['data' => ['ok' => 1]])]);
+
+    expect((new DemoClient)->show())->toBe(['ok' => 1]);
+    Http::assertSentCount(2);
+});
+
+it('honours Retry-After and bounds the attempts', function () {
+    Sleep::fake();
+    config(['service-client.retries' => 2]);
+    Http::fake(['*' => Http::response([], 429, ['Retry-After' => '2'])]);
+
+    expect(fn () => (new DemoClient)->show())->toThrow(fn (ServiceException $e) => $e->code() === 'RATE_LIMITED');
+    Http::assertSentCount(3);
+    Sleep::assertSequence([Sleep::for(2000)->milliseconds(), Sleep::for(2000)->milliseconds()]);
+});
+
+it('caps Retry-After at max_retry_after_seconds', function () {
+    Sleep::fake();
+    config(['service-client.retries' => 1, 'service-client.max_retry_after_seconds' => 5]);
+    Http::fake(['*' => Http::response([], 429, ['Retry-After' => '3600'])]);
+
+    try {
+        (new DemoClient)->show();
+    } catch (ServiceException) {
+    }
+
+    Sleep::assertSequence([Sleep::for(5000)->milliseconds()]);
+});
+
+it('retries writes with an explicit key and reuses the key', function () {
+    Sleep::fake();
+    Http::fake(['*' => Http::sequence()->push([], 502)->push(['data' => []])]);
+
+    (new DemoClient)->withIdempotencyKey('k-7')->earn([]);
+
+    Http::assertSentCount(2);
+    Http::assertSent(fn (Request $r) => $r->hasHeader('Idempotency-Key', 'k-7'));
+    $keys = Http::recorded()->map(fn ($p) => $p[0]->header('Idempotency-Key')[0])->unique();
+    expect($keys->all())->toBe(['k-7']);
+});
+
+it('does not retry statuses for writes with a generated key', function () {
+    Sleep::fake();
+    config(['service-client.allow_generated_idempotency_keys' => true]);
+    Http::fake(['*' => Http::response([], 503)]);
+
+    try {
+        (new DemoClient)->earn([]);
+    } catch (ServiceException) {
+    }
+
+    Http::assertSentCount(1);
+});
+
+it('does not retry non-retryable statuses', function () {
+    Http::fake(['*' => Http::response([], 500)]);
+
+    try {
+        (new DemoClient)->show();
+    } catch (ServiceException) {
+    }
+
+    Http::assertSentCount(1);
+});
+
+it('retries connection errors on writes with the same key', function () {
+    Sleep::fake();
+    $keys = [];
+    Http::fake(function (Request $r) use (&$keys) {
+        $keys[] = $r->header('Idempotency-Key')[0];
+        throw new ConnectionException('refused');
+    });
+
+    expect(fn () => (new DemoClient)->withIdempotencyKey('k-8')->earn([]))->toThrow(ServiceException::class);
+    expect($keys)->toBe(['k-8', 'k-8', 'k-8']);
+});
+
+it('lets a service override the retry count', function () {
+    Sleep::fake();
+    config(['services.demo.retries' => 0]);
     Http::fake(['*' => Http::response([], 503)]);
 
     try {
