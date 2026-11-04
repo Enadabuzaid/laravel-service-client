@@ -23,5 +23,7 @@ return [
     'webhook' => [
         'tolerance_seconds' => 300,
         'dedupe_ttl_seconds' => 86400,
+        // Max time one delivery may hold the per-event lock (needs a lock-capable cache store).
+        'lock_seconds' => 60,
     ],
 ];

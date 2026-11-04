@@ -48,3 +48,63 @@ it('rejects when no secret is configured', function () {
     config(['services.demo.webhook_secret' => null]);
     deliver($this)->assertUnauthorized();
 });
+
+it('does not mark an event processed when the handler returns 5xx, so it is redeliverable', function () {
+    $calls = 0;
+    Route::post('hooks/flaky', function () use (&$calls) {
+        return ++$calls === 1 ? response()->json(['error' => 'down'], 503) : response()->json(['handled' => true]);
+    })->middleware('service-webhook:demo');
+
+    $send = fn () => $this->call('POST', 'hooks/flaky', [], [], [], [
+        'HTTP_X_WEBHOOK_ID' => 'evt-9',
+        'HTTP_X_WEBHOOK_TIMESTAMP' => $ts = (string) time(),
+        'HTTP_X_WEBHOOK_SIGNATURE' => WebhookSignature::sign('whsec_test', $ts, '{"a":1}'),
+        'CONTENT_TYPE' => 'application/json',
+    ], '{"a":1}');
+
+    $send()->assertStatus(503);
+    $send()->assertOk()->assertJson(['handled' => true]);
+    $send()->assertOk()->assertJson(['data' => ['duplicate' => true]]);
+    expect($calls)->toBe(2);
+});
+
+it('does not mark an event processed when the handler throws, and releases the lock', function () {
+    $calls = 0;
+    Route::post('hooks/boom', function () use (&$calls) {
+        if (++$calls === 1) {
+            throw new RuntimeException('boom');
+        }
+
+        return response()->json(['handled' => true]);
+    })->middleware('service-webhook:demo');
+
+    $ts = (string) time();
+    $headers = [
+        'HTTP_X_WEBHOOK_ID' => 'evt-10',
+        'HTTP_X_WEBHOOK_TIMESTAMP' => $ts,
+        'HTTP_X_WEBHOOK_SIGNATURE' => WebhookSignature::sign('whsec_test', $ts, '{}'),
+        'CONTENT_TYPE' => 'application/json',
+    ];
+
+    $this->withoutExceptionHandling();
+    expect(fn () => $this->call('POST', 'hooks/boom', [], [], [], $headers, '{}'))->toThrow(RuntimeException::class);
+    $this->call('POST', 'hooks/boom', [], [], [], $headers, '{}')->assertOk()->assertJson(['handled' => true]);
+});
+
+it('returns 409 while the same event is being processed', function () {
+    $ts = (string) time();
+    $body = '{"type":"x"}';
+    $hash = hash('sha256', $ts.'.'.$body);
+    $lock = Cache::lock("service-webhook:demo:hash:{$hash}:lock", 60);
+    expect($lock->get())->toBeTrue();
+
+    deliver($this, 'evt-11', (int) $ts)->assertStatus(409)->assertJsonPath('error.code', 'WEBHOOK_IN_PROGRESS');
+    $lock->release();
+    deliver($this, 'evt-11', (int) $ts)->assertOk()->assertJson(['handled' => true]);
+});
+
+it('de-dupes a replay with a different X-Webhook-Id but identical signed payload', function () {
+    $ts = time();
+    deliver($this, 'evt-a', $ts)->assertJson(['handled' => true]);
+    deliver($this, 'evt-b', $ts)->assertOk()->assertJson(['data' => ['duplicate' => true]]);
+});

@@ -26,13 +26,50 @@ class VerifyServiceWebhook
             return response()->json(['error' => ['code' => 'INVALID_WEBHOOK_SIGNATURE', 'message' => 'Invalid webhook signature.', 'details' => (object) []]], 401);
         }
 
-        // Duplicate delivery (at-least-once): acknowledge without reprocessing.
-        $fresh = Cache::add("service-webhook:{$name}:{$id}", 1, (int) config('service-client.webhook.dedupe_ttl_seconds'));
+        // The signature covers `timestamp.body` only; X-Webhook-Id is NOT signed, so it
+        // can be forged or reused. De-dupe on the id AND on a hash of what was signed.
+        $hash = hash('sha256', (string) $request->header('X-Webhook-Timestamp').'.'.$request->getContent());
+        $keys = ["service-webhook:{$name}:id:{$id}", "service-webhook:{$name}:hash:{$hash}"];
 
-        if (! $fresh) {
-            return response()->json(['data' => ['duplicate' => true]]);
+        foreach ($keys as $key) {
+            if (Cache::has("{$key}:processed")) {
+                return response()->json(['data' => ['duplicate' => true]]);
+            }
         }
 
-        return $next($request);
+        // Atomic locks stop concurrent redeliveries running the handler twice.
+        $locks = [];
+
+        foreach ($keys as $key) {
+            $lock = Cache::lock("{$key}:lock", (int) config('service-client.webhook.lock_seconds', 60));
+
+            if (! $lock->get()) {
+                foreach ($locks as $held) {
+                    $held->release();
+                }
+
+                // Same event is being handled right now: non-2xx so the sender redelivers.
+                return response()->json(['error' => ['code' => 'WEBHOOK_IN_PROGRESS', 'message' => 'This webhook is already being processed.', 'details' => (object) []]], 409);
+            }
+
+            $locks[] = $lock;
+        }
+
+        try {
+            $response = $next($request);
+
+            // Only a handled (non-5xx) delivery is final; a failure stays redeliverable.
+            if ($response->getStatusCode() < 500) {
+                foreach ($keys as $key) {
+                    Cache::put("{$key}:processed", 1, (int) config('service-client.webhook.dedupe_ttl_seconds'));
+                }
+            }
+
+            return $response;
+        } finally {
+            foreach ($locks as $lock) {
+                $lock->release();
+            }
+        }
     }
 }
