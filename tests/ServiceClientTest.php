@@ -25,8 +25,11 @@ class DemoClient extends ServiceClient
     {
         return $this->get('/api/v1/thing')->json('data');
     }
+}
 
-    public static function fakeInstance(): object
+class CustomFakeClient extends DemoClient
+{
+    public static function fakeInstance(): ?object
     {
         return new class {};
     }
@@ -228,10 +231,63 @@ it('is not configured without a url', function () {
         ->and(fn () => (new DemoClient)->show())->toThrow(ServiceException::class);
 });
 
-it('binds a fake in the container', function () {
-    $fake = DemoClient::fake();
+it('binds a custom fake object in the container', function () {
+    $fake = CustomFakeClient::fake();
 
-    expect(app(DemoClient::class))->toBe($fake);
+    expect(app(CustomFakeClient::class))->toBe($fake);
+
+    CustomFakeClient::resetFake();
+    expect(app(CustomFakeClient::class))->not->toBe($fake);
+});
+
+it('binds an explicitly passed fake object', function () {
+    $mine = new stdClass;
+
+    expect(DemoClient::fake($mine))->toBe($mine)->and(app(DemoClient::class))->toBe($mine);
+    DemoClient::resetFake();
+});
+
+it('fakes out of the box and records requests', function () {
+    $fake = DemoClient::fake(['demo.test/*' => Http::response(['data' => ['ok' => true]])]);
+
+    expect((new DemoClient)->withIdempotencyKey('k')->earn(['points' => 3]))->toBe(['ok' => true]);
+
+    $fake->assertSentCount(1)
+        ->assertSent(fn (Request $r) => $r->method() === 'POST' && $r['points'] === 3)
+        ->assertNotSent(fn (Request $r) => $r->method() === 'GET');
+});
+
+it('scopes recorded requests to the faked service', function () {
+    config(['services.other' => ['url' => 'http://other.test']]);
+    $fake = DemoClient::fake(['demo.test/*' => Http::response(['data' => []])]);
+    Http::fake(['other.test/*' => Http::response([])]);
+
+    (new DemoClient)->show();
+    Http::get('http://other.test/x');
+
+    $fake->assertSentCount(1);
+});
+
+it('resets the container binding and http state', function () {
+    $fake = DemoClient::fake(['*' => Http::response(['data' => []])]);
+    (new DemoClient)->show();
+    $fake->assertSentCount(1);
+
+    $fake->reset();
+
+    expect(Http::recorded())->toHaveCount(0);
+});
+
+it('lets one app call two services under different application codes', function () {
+    config(['services.demo.application' => 'salonakhub-b2b']);
+    Http::fake(['*' => Http::response(['data' => []])]);
+
+    (new DemoClient)->show();
+    Http::assertSent(fn (Request $r) => $r->hasHeader('X-Application', 'salonakhub-b2b'));
+
+    config(['services.demo.application' => null]);
+    (new DemoClient)->show();
+    Http::assertSent(fn (Request $r) => $r->hasHeader('X-Application', 'tafadel'));
 });
 
 it('maps non-envelope bodies by status and preserves the message', function (int $status, string $code) {

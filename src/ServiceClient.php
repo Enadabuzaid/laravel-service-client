@@ -15,8 +15,9 @@ use Illuminate\Support\Str;
  * Base for every enadstack/<name>-client. Subclasses implement serviceName()
  * and expose typed methods that call get()/post()/patch()/delete().
  *
- * Config read from services.<name>: url, api_key (or token), timeout,
- * connect_timeout, webhook_secret.
+ * Config read from services.<name>: url, api_key (or token), application
+ * (overrides service-client.application), timeout, connect_timeout, retries,
+ * webhook_secret.
  */
 abstract class ServiceClient
 {
@@ -171,7 +172,7 @@ abstract class ServiceClient
     protected function pending(string $method, ?string $idempotencyKey = null): PendingRequest
     {
         $headers = array_filter([
-            'X-Application' => config('service-client.application'),
+            'X-Application' => $this->config('application') ?: config('service-client.application'),
             'X-Tenant-Reference' => $this->tenantReference,
             'X-Request-Id' => $this->requestId ?? (string) Str::uuid(),
             'Accept' => 'application/json',
