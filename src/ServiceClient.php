@@ -183,8 +183,8 @@ abstract class ServiceClient
 
         $request = Http::baseUrl(rtrim((string) $this->config('url'), '/'))
             ->withHeaders($headers)
-            ->timeout((int) $this->config('timeout', config('service-client.timeout')))
-            ->connectTimeout((int) $this->config('connect_timeout', config('service-client.connect_timeout')))
+            ->timeout($this->seconds('timeout', 10))
+            ->connectTimeout($this->seconds('connect_timeout', 5))
             ->retry(
                 $this->maxAttempts(),
                 fn (int $attempt, ?\Throwable $e) => $this->retryDelayMs($e),
@@ -195,6 +195,21 @@ abstract class ServiceClient
         $token = $this->config('api_key', $this->config('token'));
 
         return filled($token) ? $request->withToken($token) : $request;
+    }
+
+    /**
+     * Positive timeout in seconds: service config, then package config, then
+     * $default. null/absent/0/negative never yields 0 (which means "no timeout").
+     */
+    protected function seconds(string $key, int $default): int
+    {
+        foreach ([$this->config($key), config("service-client.{$key}")] as $value) {
+            if (is_numeric($value) && (int) $value > 0) {
+                return (int) $value;
+            }
+        }
+
+        return $default;
     }
 
     /** Total attempts (1 + retries); services.<name>.retries overrides the global value. */

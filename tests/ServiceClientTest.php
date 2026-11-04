@@ -267,3 +267,24 @@ it('parses an HTTP-date Retry-After', function () {
 
     expect(fn () => (new DemoClient)->show())->toThrow(fn (ServiceException $e) => $e->retryAfter() >= 28 && $e->retryAfter() <= 30);
 });
+
+function pendingOptions(): array
+{
+    return (function () {
+        $pending = $this->pending('GET');
+
+        return (new ReflectionProperty($pending, 'options'))->getValue($pending);
+    })->call(new DemoClient);
+}
+
+it('falls back to default timeouts when configured with null or 0', function (mixed $value) {
+    config(['services.demo.timeout' => $value, 'services.demo.connect_timeout' => $value, 'service-client.timeout' => $value, 'service-client.connect_timeout' => $value]);
+
+    expect(pendingOptions())->toMatchArray(['timeout' => 10, 'connect_timeout' => 5]);
+})->with([null, 0, '0', -1]);
+
+it('uses the service timeout when valid, else the package value', function () {
+    config(['services.demo.timeout' => 30, 'services.demo.connect_timeout' => null, 'service-client.connect_timeout' => 2]);
+
+    expect(pendingOptions())->toMatchArray(['timeout' => 30, 'connect_timeout' => 2]);
+});
