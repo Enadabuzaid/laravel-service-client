@@ -5,6 +5,8 @@ use Enadstack\ServiceClient\ServiceException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class DemoClient extends ServiceClient
 {
@@ -50,6 +52,38 @@ it('sends standard headers and idempotency key on writes', function () {
         && $r['points'] === 5);
 });
 
+it('throws when a write has no explicit idempotency key', function () {
+    Http::fake();
+
+    try {
+        (new DemoClient)->earn([]);
+        $this->fail('expected exception');
+    } catch (ServiceException $e) {
+        expect($e->code())->toBe('IDEMPOTENCY_KEY_REQUIRED');
+    }
+
+    Http::assertNothingSent();
+});
+
+it('generates and warns when allowed by config', function () {
+    config(['service-client.allow_generated_idempotency_keys' => true]);
+    Log::spy();
+    Http::fake(['*' => Http::response(['data' => []])]);
+
+    (new DemoClient)->earn([]);
+
+    Http::assertSent(fn (Request $r) => Str::isUuid($r->header('Idempotency-Key')[0]));
+    Log::shouldHaveReceived('warning')->once();
+});
+
+it('mirrors the key into the body when asked', function () {
+    Http::fake(['*' => Http::response(['data' => []])]);
+
+    (new DemoClient)->withIdempotencyKey('k-9', inBody: true)->earn(['a' => 1]);
+
+    Http::assertSent(fn (Request $r) => $r->hasHeader('Idempotency-Key', 'k-9') && $r['idempotency_key'] === 'k-9' && $r['a'] === 1);
+});
+
 it('does not send an idempotency key on reads', function () {
     Http::fake(['*' => Http::response(['data' => []])]);
 
@@ -62,7 +96,7 @@ it('maps the error envelope to ServiceException', function () {
     Http::fake(['*' => Http::response(['error' => ['code' => 'INSUFFICIENT_POINTS', 'message' => 'No.', 'details' => ['need' => 10]]], 422)]);
 
     try {
-        (new DemoClient)->earn([]);
+        (new DemoClient)->withIdempotencyKey('k')->earn([]);
         $this->fail('expected exception');
     } catch (ServiceException $e) {
         expect($e->code())->toBe('INSUFFICIENT_POINTS')

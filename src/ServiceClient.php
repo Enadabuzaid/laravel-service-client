@@ -7,6 +7,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -26,6 +27,8 @@ abstract class ServiceClient
 
     protected ?string $requestId = null;
 
+    protected bool $idempotencyKeyInBody = false;
+
     /** Config key under services.* (e.g. "loyalty"). */
     abstract protected function serviceName(): string;
 
@@ -37,10 +40,16 @@ abstract class ServiceClient
         return $clone;
     }
 
-    public function withIdempotencyKey(?string $key): static
+    /**
+     * Explicit idempotency key for the next write. With $inBody the key is also
+     * mirrored into the JSON body as `idempotency_key` (for services that read
+     * the body field rather than the header).
+     */
+    public function withIdempotencyKey(?string $key, bool $inBody = false): static
     {
         $clone = clone $this;
         $clone->idempotencyKey = $key;
+        $clone->idempotencyKeyInBody = $inBody;
 
         return $clone;
     }
@@ -99,7 +108,13 @@ abstract class ServiceClient
             throw new ServiceException('SERVICE_NOT_CONFIGURED', "Service [{$this->serviceName()}] has no URL configured.");
         }
 
-        $request = $this->pending($method);
+        $idempotencyKey = $this->resolveIdempotencyKey($method);
+
+        if ($idempotencyKey !== null && $this->idempotencyKeyInBody) {
+            $data['idempotency_key'] = $idempotencyKey;
+        }
+
+        $request = $this->pending($method, $idempotencyKey);
         $url = '/'.ltrim($path, '/');
 
         try {
@@ -115,7 +130,44 @@ abstract class ServiceClient
         return $response;
     }
 
-    protected function pending(string $method): PendingRequest
+    protected function isWrite(string $method): bool
+    {
+        return in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true);
+    }
+
+    /**
+     * Writes need an explicit key. A random one defeats idempotency (a retry by
+     * the caller would get a new key), so it is only generated when
+     * service-client.allow_generated_idempotency_keys is true.
+     *
+     * @throws ServiceException
+     */
+    protected function resolveIdempotencyKey(string $method): ?string
+    {
+        if (! $this->isWrite($method)) {
+            return null;
+        }
+
+        if (filled($this->idempotencyKey)) {
+            return $this->idempotencyKey;
+        }
+
+        if (! config('service-client.allow_generated_idempotency_keys', false)) {
+            throw new ServiceException(
+                ServiceException::IDEMPOTENCY_KEY_REQUIRED,
+                "Service [{$this->serviceName()}] {$method} requires an explicit idempotency key; call withIdempotencyKey().",
+            );
+        }
+
+        Log::warning('service-client: generated a random idempotency key; retries by the caller will not be deduplicated.', [
+            'service' => $this->serviceName(),
+            'method' => $method,
+        ]);
+
+        return (string) Str::uuid();
+    }
+
+    protected function pending(string $method, ?string $idempotencyKey = null): PendingRequest
     {
         $headers = array_filter([
             'X-Application' => config('service-client.application'),
@@ -124,8 +176,8 @@ abstract class ServiceClient
             'Accept' => 'application/json',
         ]);
 
-        if (in_array($method, ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
-            $headers['Idempotency-Key'] = $this->idempotencyKey ?? (string) Str::uuid();
+        if ($this->isWrite($method) && $idempotencyKey !== null) {
+            $headers['Idempotency-Key'] = $idempotencyKey;
         }
 
         $request = Http::baseUrl(rtrim((string) $this->config('url'), '/'))

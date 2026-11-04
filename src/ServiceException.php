@@ -9,6 +9,8 @@ class ServiceException extends RuntimeException
 {
     public const UNREACHABLE = 'SERVICE_UNREACHABLE';
 
+    public const IDEMPOTENCY_KEY_REQUIRED = 'IDEMPOTENCY_KEY_REQUIRED';
+
     /**
      * @param  array<string, mixed>  $details
      */
