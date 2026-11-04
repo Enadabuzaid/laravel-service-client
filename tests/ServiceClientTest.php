@@ -150,3 +150,37 @@ it('binds a fake in the container', function () {
 
     expect(app(DemoClient::class))->toBe($fake);
 });
+
+it('maps non-envelope bodies by status and preserves the message', function (int $status, string $code) {
+    Http::fake(['*' => Http::response(['message' => 'Unauthorized'], $status, ['Retry-After' => '7'])]);
+
+    try {
+        (new DemoClient)->show();
+        $this->fail('expected exception');
+    } catch (ServiceException $e) {
+        expect($e->code())->toBe($code)
+            ->and($e->status())->toBe($status)
+            ->and($e->getMessage())->toBe('Unauthorized')
+            ->and($e->retryAfter())->toBe(7);
+    }
+})->with([
+    [401, 'UNAUTHORIZED'], [403, 'FORBIDDEN'], [404, 'NOT_FOUND'], [409, 'CONFLICT'],
+    [422, 'VALIDATION_FAILED'], [429, 'RATE_LIMITED'], [500, 'SERVICE_ERROR'], [503, 'SERVICE_ERROR'],
+]);
+
+it('exposes validation errors as details for 422 bodies', function () {
+    Http::fake(['*' => Http::response(['message' => 'Invalid.', 'errors' => ['name' => ['required']]], 422)]);
+
+    expect(fn () => (new DemoClient)->show())->toThrow(fn (ServiceException $e) => $e->details() === ['name' => ['required']]);
+});
+
+it('reports retryable statuses', function (int $status, bool $retryable) {
+    expect((new ServiceException('X', 'm', $status))->isRetryable())->toBe($retryable)
+        ->and(ServiceException::unreachable('demo')->isRetryable())->toBeTrue();
+})->with([[429, true], [502, true], [503, true], [504, true], [500, false], [404, false], [422, false]]);
+
+it('parses an HTTP-date Retry-After', function () {
+    Http::fake(['*' => Http::response([], 429, ['Retry-After' => gmdate('D, d M Y H:i:s', time() + 30).' GMT'])]);
+
+    expect(fn () => (new DemoClient)->show())->toThrow(fn (ServiceException $e) => $e->retryAfter() >= 28 && $e->retryAfter() <= 30);
+});

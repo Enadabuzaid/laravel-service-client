@@ -198,18 +198,59 @@ abstract class ServiceClient
 
     protected function mapError(Response $response): ServiceException
     {
+        $status = $response->status();
+        $retryAfter = static::parseRetryAfter($response->header('Retry-After'));
         $error = $response->json('error');
 
+        // Standard envelope: {"error": {code, message, details}}.
         if (is_array($error) && isset($error['code'])) {
             return new ServiceException(
                 (string) $error['code'],
                 (string) ($error['message'] ?? 'Service error.'),
-                $response->status(),
+                $status,
                 (array) ($error['details'] ?? []),
+                null,
+                $retryAfter,
             );
         }
 
-        return new ServiceException('SERVICE_ERROR', "Service [{$this->serviceName()}] returned HTTP {$response->status()}.", $response->status());
+        // Anything else (framework/proxy bodies such as {"message": "Unauthorized"}): map by status.
+        $body = $response->json();
+        $message = is_array($body) && is_string($body['message'] ?? null) && $body['message'] !== ''
+            ? $body['message']
+            : "Service [{$this->serviceName()}] returned HTTP {$status}.";
+        $details = is_array($body) && is_array($body['errors'] ?? null) ? $body['errors'] : [];
+
+        return new ServiceException(static::codeForStatus($status), $message, $status, $details, null, $retryAfter);
+    }
+
+    protected static function codeForStatus(int $status): string
+    {
+        return match (true) {
+            $status === 401 => ServiceException::UNAUTHORIZED,
+            $status === 403 => ServiceException::FORBIDDEN,
+            $status === 404 => ServiceException::NOT_FOUND,
+            $status === 409 => ServiceException::CONFLICT,
+            $status === 422 => ServiceException::VALIDATION_FAILED,
+            $status === 429 => ServiceException::RATE_LIMITED,
+            default => ServiceException::SERVICE_ERROR,
+        };
+    }
+
+    /** Retry-After as seconds; accepts delta-seconds or an HTTP date. */
+    protected static function parseRetryAfter(?string $value): ?int
+    {
+        if ($value === null || trim($value) === '') {
+            return null;
+        }
+
+        if (ctype_digit(trim($value))) {
+            return (int) $value;
+        }
+
+        $at = strtotime($value);
+
+        return $at === false ? null : max(0, $at - time());
     }
 
     protected function config(string $key, mixed $default = null): mixed

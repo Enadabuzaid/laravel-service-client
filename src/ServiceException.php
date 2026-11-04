@@ -9,6 +9,20 @@ class ServiceException extends RuntimeException
 {
     public const UNREACHABLE = 'SERVICE_UNREACHABLE';
 
+    public const SERVICE_ERROR = 'SERVICE_ERROR';
+
+    public const UNAUTHORIZED = 'UNAUTHORIZED';
+
+    public const FORBIDDEN = 'FORBIDDEN';
+
+    public const NOT_FOUND = 'NOT_FOUND';
+
+    public const CONFLICT = 'CONFLICT';
+
+    public const VALIDATION_FAILED = 'VALIDATION_FAILED';
+
+    public const RATE_LIMITED = 'RATE_LIMITED';
+
     public const IDEMPOTENCY_KEY_REQUIRED = 'IDEMPOTENCY_KEY_REQUIRED';
 
     /**
@@ -20,6 +34,7 @@ class ServiceException extends RuntimeException
         protected int $status = 0,
         protected array $details = [],
         ?Throwable $previous = null,
+        protected ?int $retryAfter = null,
     ) {
         parent::__construct($message, $status, $previous);
     }
@@ -38,6 +53,18 @@ class ServiceException extends RuntimeException
     public function details(): array
     {
         return $this->details;
+    }
+
+    /** Seconds from the Retry-After header, when the service sent one. */
+    public function retryAfter(): ?int
+    {
+        return $this->retryAfter;
+    }
+
+    /** Transient failure worth retrying: unreachable, 429, 502, 503, 504. */
+    public function isRetryable(): bool
+    {
+        return $this->errorCode === self::UNREACHABLE || in_array($this->status, [429, 502, 503, 504], true);
     }
 
     public static function unreachable(string $service, ?Throwable $previous = null): self
